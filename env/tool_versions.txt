@@ -1,0 +1,26 @@
+# S0 工具版本与选择
+# 记录日期：2026-10-26（Asia/Shanghai）
+# 项目：riscv-npu-soc
+
+[主机]
+Windows = Microsoft Windows 11, version 10.0.26200, build 26200
+WSL = Ubuntu 26.04.1 LTS, x86_64
+WSL 内核 = 6.18.54.1-microsoft-standard-WSL2
+执行 shell = /bin/bash
+仓库（Windows） = D:\Desktop\riscv-npu-soc
+仓库（WSL） = /mnt/d/Desktop/riscv-npu-soc
+
+[选定工具链：WSL]
+git = 2.53.0, /usr/bin/git
+python3 = 3.14.4, /usr/bin/python3
+make = GNU Make 4.4.1
+g++ = 15.2.0
+verilator = 5.032 2025-01-01 (Debian 5.032-1), /usr/bin/verilator, 来源 Ubuntu apt
+yosys = 0.52 (git sha1 fee39a3284c90249e1d9684cf6944ffbbcbb8f90), /usr/bin/yosys, 来源 Ubuntu apt
+
+[仅探测，未用于本阶段]
+Windows git = 2.52.0.windows.1
+Windows python = 3.12.10, D:\python\py_3_12_10\python
+Icarus Verilog = 14.0, D:\Software\iverilog
+Questa FSE = 2025.2, D:\Software\ModelSim\questa_fse
+Anlogic TD = 6.2.1, D:\Software\Anlogic（排除：不属于本项目工具链）
