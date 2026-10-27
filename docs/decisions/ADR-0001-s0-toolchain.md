@@ -1,32 +1,38 @@
-# ADR-0001：仓库与工具链选择
+# ADR-0001：S0 工具链选择
 
 - 日期：2026-10-27
-- 状态：定了，不再改（除非有明确理由）
+- 状态：已采纳，待 S0 验证
 
 ## 背景
 
-想在家里这台机器上做 RTL，需要一个能真跑的仿真 + 综合闭环。机器上已经有 Git、Python、Icarus 和 Questa，但没有 Yosys / Verilator。WSL2 里的 Ubuntu 26.04.1 是装好的，apt 里有 Verilator 5.032 和 Yosys 0.52。
+S0 需要建立可重复运行的 RTL 仿真、综合与回归流程。当前开发主机为 Windows，已配置 WSL2 Ubuntu；本地工具探测结果记录在 [tool_versions.txt](../../env/tool_versions.txt)。
 
-## 选项
+主要选择是将仿真与综合集中在 WSL，或以 Windows 现有仿真器为主，再单独配置综合工具。
 
-| 选项 | 优点 | 缺点 |
+## 备选方案
+
+| 方案 | 优点 | 代价 |
 |---|---|---|
-| A. WSL Ubuntu 里跑 Verilator + Yosys | 仿真和综合都是自由软件；RTL 命令全在 Linux 路径下，跟以后跑脚本一致 | 得进 WSL；WSL 里只有 `python3`，没有 `python` 别名 |
-| B. Windows 上用 Icarus / Questa + 另装 Yosys | 复用现成工具 | 综合还得装；路径和教程里写的不一样，容易来回踩坑 |
+| WSL：Verilator + Yosys | 主仿真与综合在同一 shell 下执行，便于编写统一脚本 | Windows 侧的四态仿真器仍需跨环境调用 |
+| Windows：Icarus / Questa + 另行配置综合工具 | 可复用现有仿真器 | 需要补充综合工具，并维护对应的路径和命令配置 |
 
-## 决定
+## 决策
 
-选 A。
+采用 WSL 作为主要执行环境：
 
-- 仓库放在 `D:\Desktop\riscv-npu-soc`，WSL 里是 `/mnt/d/Desktop/riscv-npu-soc`，单独一个 git 仓库，不塞进别的目录。
-- 执行环境：WSL2 Ubuntu 26.04.1 LTS（x86_64），bash。
-- 仿真：Verilator 5.032（二态）；四态用 Windows 那边的 Icarus 14.0，走 `wslpath` 转路径。
-- 综合：Yosys 0.52。
-- 脚本解释器：`python3` 3.14.4。
-- 板卡厂商工具先不装，FPGA 那步再说。
+- 系统：WSL2 Ubuntu 26.04.1 LTS，x86_64，bash。
+- 主仿真器：Verilator 5.032。
+- 综合工具：Yosys 0.52。
+- 脚本解释器：Python 3.14.4，统一使用 `python3` 命令。
+- 四态仿真：计划调用 Windows 侧 Icarus Verilog 14.0，跨环境路径通过 `wslpath` 转换。
+- FPGA 厂商工具在 V4 阶段按板卡选择。
 
-## 理由和后果
+上述版本来自本地环境记录，尚未完成 S0 回归验证。
 
-- 理由：一条命令能从头跑到尾，不用在 Windows 和 WSL 之间倒腾文件；S0 不需要板卡和 license。
-- 后果：以后所有 RTL 命令默认在 WSL 里执行，README 里写的命令都得带 `python3`。
-- 验证：实际版本记在 `env/tool_versions.txt`，改工具版本要顺手更新这个文件。
+## 影响与验证
+
+主回归入口在 WSL 执行。调用 Windows 四态仿真器时，需要处理路径转换，并正确传递失败退出码；这部分互操作也属于 S0 验收范围。
+
+S0 将分别验证普通仿真、X/Z 注入失败、自检失败、综合与干净重建。通过后补充具体命令和日志；更新工具版本时同步更新环境记录。
+
+脚本应相对仓库根目录定位文件，不依赖个人机器上的固定路径。环境记录中的绝对路径仅用于追溯最初的工具探测环境。
