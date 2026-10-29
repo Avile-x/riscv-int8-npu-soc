@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import shutil
 import subprocess
@@ -15,15 +16,24 @@ from typing import Literal
 ROOT = Path(__file__).resolve().parents[1]
 BUILD_ROOT = ROOT / "build"
 
-CheckKind = Literal["sim", "synth"]
+CheckKind = Literal["sim", "sim4", "synth"]
 
 SIM_TOP = "tb_smoke_counter"
 SIM_COMPILE_TIMEOUT_S = 120.0
 SIM_RUN_TIMEOUT_S = 60.0
+FOUR_STATE_COMPILE_TIMEOUT_S = 120.0
+FOUR_STATE_RUN_TIMEOUT_S = 60.0
 SYNTH_TIMEOUT_S = 120.0
 
 SIM_COMPILE_FORBIDDEN = (r"%Error", r"%Warning", r"SMOKE_FAIL")
 SIM_RUN_FORBIDDEN = (r"%Error", r"SMOKE_FAIL")
+FOUR_STATE_COMPILE_FORBIDDEN = (
+    r"error:",
+    r"syntax error",
+    r"warning:",
+    r"SMOKE_FAIL",
+)
+FOUR_STATE_RUN_FORBIDDEN = (r"ERROR:", r"FATAL:", r"SMOKE_FAIL")
 SYNTH_FORBIDDEN = (
     r"ERROR:",
     r"Warning:",
@@ -122,6 +132,67 @@ def _fail_on_patterns(text: str, patterns: tuple[str, ...], label: str) -> None:
             raise SmokeFailure(
                 f"{label} emitted forbidden pattern {pattern!r}; see build log"
             )
+
+def _find_four_state_tool() -> tuple[Path, Path, bool]:
+    candidates: list[Path] = []
+    override = os.environ.get("FOUR_STATE_IVERILOG")
+    if override:
+        match = re.fullmatch(r"([A-Za-z]):[\\/](.*)", override)
+        if match:
+            drive = match.group(1).lower()
+            rest = match.group(2).replace("\\", "/")
+            candidates.append(Path(f"/mnt/{drive}/{rest}"))
+        else:
+            candidates.append(Path(override))
+
+    native = shutil.which("iverilog")
+    if native:
+        candidates.append(Path(native))
+    candidates.extend(
+        [
+            Path("/mnt/d/Software/iverilog/bin/iverilog.exe"),
+            Path("/mnt/c/iverilog/bin/iverilog.exe"),
+        ]
+    )
+
+    for compiler in candidates:
+        if not compiler.is_file():
+            continue
+        if compiler.suffix.lower() == ".exe":
+            vvp = compiler.with_name("vvp.exe")
+            windows_tool = True
+        else:
+            native_vvp = shutil.which("vvp")
+            if native_vvp is None:
+                continue
+            vvp = Path(native_vvp)
+            windows_tool = False
+        if vvp.is_file():
+            return compiler, vvp, windows_tool
+
+    raise FileNotFoundError("iverilog")
+
+def _to_windows_path(path: Path) -> str:
+    try:
+        result = subprocess.run(
+            ["wslpath", "-w", str(path)],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10.0,
+        )
+    except FileNotFoundError as exc:
+        raise SmokeFailure(
+            "wslpath not found; cannot invoke Windows Icarus"
+        ) from exc
+    except subprocess.TimeoutExpired as exc:
+        raise SmokeFailure("wslpath timed out while converting a path") from exc
+    converted = result.stdout.strip()
+    if result.returncode != 0 or not converted:
+        raise SmokeFailure(
+            f"wslpath failed for {path}: {result.stderr.strip()}"
+        )
+    return converted
 
 def check_simulation(build_dir: Path) -> None:
     _prepare_build_dir(build_dir)
@@ -225,11 +296,116 @@ def check_synthesis(build_dir: Path) -> None:
 
     print("synthesis PASS: top=smoke_counter")
 
+def check_four_state(build_dir: Path) -> None:
+    compiler, vvp, windows_tool = _find_four_state_tool()
+    origin = "Windows Icarus via WSL interop" if windows_tool else "native Icarus"
+    print(f"four-state tool: {compiler} ({origin})")
+
+    _prepare_build_dir(build_dir)
+
+    compile_log = build_dir / "compile.log"
+    binary = build_dir / "sim_smoke4.vvp"
+    rtl = ROOT / "rtl/smoke/smoke_counter.sv"
+    tb = ROOT / "tb/smoke/tb_smoke_counter.sv"
+
+    def tool_path(path: Path) -> str:
+        return _to_windows_path(path) if windows_tool else str(path)
+
+    compile_argv = [
+        str(compiler),
+        "-g2012",
+        "-Wall",
+        "-o",
+        tool_path(binary),
+        tool_path(rtl),
+        tool_path(tb),
+    ]
+    compile_result = _run_and_log(
+        compile_argv, ROOT, FOUR_STATE_COMPILE_TIMEOUT_S, compile_log
+    )
+    compile_text = _combined(compile_result)
+    if compile_result.returncode != 0:
+        raise SmokeFailure(
+            f"Icarus compile failed with exit {compile_result.returncode}; "
+            f"see {compile_log}"
+        )
+    _fail_on_patterns(
+        compile_text, FOUR_STATE_COMPILE_FORBIDDEN, "Icarus compile"
+    )
+    if not binary.is_file():
+        raise SmokeFailure(f"four-state simulation binary missing: {binary}")
+
+    for label, plusarg, expected_got in (
+        ("X", "+inject_x", "xx"),
+        ("Z", "+inject_z", "zz"),
+    ):
+        log_path = build_dir / f"run_{label.lower()}.log"
+        result = _run_and_log(
+            [str(vvp), tool_path(binary), plusarg],
+            build_dir,
+            FOUR_STATE_RUN_TIMEOUT_S,
+            log_path,
+        )
+        text = _combined(result)
+        if result.returncode == 0:
+            raise SmokeFailure(
+                f"{label} injection unexpectedly passed (exit 0); see {log_path}"
+            )
+        if "SMOKE_PASS" in text:
+            raise SmokeFailure(
+                f"{label} injection emitted SMOKE_PASS; see {log_path}"
+            )
+        if "SMOKE_FAIL" not in text:
+            raise SmokeFailure(
+                f"{label} injection did not emit SMOKE_FAIL; see {log_path}"
+            )
+        if f"got={expected_got}" not in text.lower():
+            raise SmokeFailure(
+                f"{label} injection did not report got={expected_got}; "
+                f"see {log_path}"
+            )
+        print(
+            f"four-state {label} injection PASS: "
+            f"exit={result.returncode}, got={expected_got}"
+        )
+
+    normal_log = build_dir / "run_normal.log"
+    normal_result = _run_and_log(
+        [str(vvp), tool_path(binary)],
+        build_dir,
+        FOUR_STATE_RUN_TIMEOUT_S,
+        normal_log,
+    )
+    normal_text = _combined(normal_result)
+    if normal_result.returncode != 0:
+        raise SmokeFailure(
+            f"four-state normal simulation failed with exit "
+            f"{normal_result.returncode}; see {normal_log}"
+        )
+    _fail_on_patterns(
+        normal_text, FOUR_STATE_RUN_FORBIDDEN, "Icarus normal run"
+    )
+    pass_lines = [
+        line.strip()
+        for line in normal_text.splitlines()
+        if line.strip().startswith("SMOKE_PASS")
+    ]
+    if len(pass_lines) != 1 or re.fullmatch(
+        r"SMOKE_PASS checks=\d+", pass_lines[0]
+    ) is None:
+        raise SmokeFailure(
+            f"expected exactly one valid SMOKE_PASS marker, got {pass_lines!r}"
+        )
+    vcd_path = build_dir / "smoke.vcd"
+    if not vcd_path.is_file() or vcd_path.stat().st_size == 0:
+        raise SmokeFailure(f"four-state VCD trace missing or empty: {vcd_path}")
+    print(f"four-state normal PASS: {pass_lines[0]}")
+
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Run the S0 smoke simulation or synthesis check."
+        description="Run the S0 smoke simulation, four-state, or synthesis check."
     )
-    parser.add_argument("kind", choices=("sim", "synth"))
+    parser.add_argument("kind", choices=("sim", "sim4", "synth"))
     args = parser.parse_args()
 
     build_dir = BUILD_ROOT / args.kind
@@ -237,6 +413,8 @@ def main() -> int:
     try:
         if args.kind == "sim":
             check_simulation(build_dir)
+        elif args.kind == "sim4":
+            check_four_state(build_dir)
         else:
             check_synthesis(build_dir)
     except subprocess.TimeoutExpired as exc:

@@ -63,6 +63,23 @@ module tb_smoke_counter;
         checks   = 0;
         state    = TEST_RESET;
 
+        // 四态检查器自检：故意把 DUT 输出强制为 X/Z，确认 !== 真的判败。
+        // 二态工具不支持 force-Z，因此仅在 Icarus 四态路径编译。
+`ifndef VERILATOR
+        if ($test$plusargs("inject_x")) begin
+            force dut.count = 8'hxx;
+            check_count(8'h00);
+            $display("CHECKER_BROKEN: X was not detected");
+            $fatal(1, "X injection unexpectedly passed");
+        end
+        if ($test$plusargs("inject_z")) begin
+            force dut.count = 8'hzz;
+            check_count(8'h00);
+            $display("CHECKER_BROKEN: Z was not detected");
+            $fatal(1, "Z injection unexpectedly passed");
+        end
+`endif
+
         // 初始同步复位：连续两个上升沿都为 0。
         repeat (2) begin
             drive(1'b1, 1'b0);
