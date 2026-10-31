@@ -77,7 +77,7 @@ flowchart LR
     class CTRL,ARRAY npu
 ```
 
-颜色仅用于区分模块，所有模块均为计划内容。
+图中的 SoC 集成与跨时钟域模块尚未实现。
 
 ### 一次任务的处理过程
 
@@ -112,7 +112,7 @@ C[i][j] = Σ(k=0..3) A[i][k] × B[k][j]
 | 任务并发 | 单个在途任务 |
 | 计算核复位 | 同步高有效，复位期间对外 `valid` 为 0 |
 
-具体周期编号、装载与输出区间的重叠关系尚待逐拍时序表确认，原有时序草案保留在 [V1 计划](docs/ROADMAP.md) 中。
+周期编号、权重装载、数据注入与结果捕获的时序见 [V1 阵列规格](docs/architecture/v1-array-spec.md)。对应的设计决策仍为草案，尚未完成 RTL 验证。
 
 ### 从矩阵任务到网络层
 
@@ -175,9 +175,11 @@ C[i][j] = Σ(k=0..3) A[i][k] × B[k][j]
 |---|---|
 | [阶段计划](docs/ROADMAP.md) | S0–V4 的设计草案、验收条件与交付物 |
 | [工具链选型](docs/decisions/ADR-0001-s0-toolchain.md) | 开发环境的选择理由与验证范围 |
-| [本地环境记录](env/tool_versions.txt) | 工具探测结果、版本与初始环境路径 |
+| [V1 阵列规格](docs/architecture/v1-array-spec.md) | 数值、接口、PE 映射与逐拍时序 |
+| [V1 阵列设计决策](docs/decisions/ADR-0002-v1-array-contract.md) | 阵列映射方案与取舍（草案） |
+| [本地环境记录](env/tool_versions.txt) | 工具版本、开发环境与调用方式 |
 
-### 当前仓库内容
+### 部分文件与目录
 
 ```text
 .
@@ -193,7 +195,7 @@ C[i][j] = Σ(k=0..3) A[i][k] × B[k][j]
 ```
 
 <details>
-<summary><strong>后续代码目录规划（尚未加入）</strong></summary>
+<summary><strong>代码目录规划</strong></summary>
 
 | 目录 | 内容 |
 |---|---|
