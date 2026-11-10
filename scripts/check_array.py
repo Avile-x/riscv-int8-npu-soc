@@ -51,8 +51,8 @@ FOUR_STATE_NORMAL_FORBIDDEN = (r"ERROR:", r"FATAL:", r"ARRAY_FAIL")
 SUMMARY_RE = re.compile(
     r"ARRAY_SUMMARY formal_cases=(\d+) formal_elements=(\d+) "
     r"mapping_cases=(\d+) transactions=(\d+) checks=(\d+) "
-    r"protocol_checks=(\d+) alignment_checks=(\d+) capture_checks=(\d+) "
-    r"reset_cases=(\d+) stale_cases=(\d+)"
+    r"protocol_checks=(\d+) alignment_checks=(\d+) pe_checks=(\d+) "
+    r"capture_checks=(\d+) reset_cases=(\d+) stale_cases=(\d+)"
 )
 PASS_RE = re.compile(
     r"ARRAY_PASS checks=(\d+) formal_cases=(\d+) "
@@ -91,6 +91,16 @@ FOUR_STATE_INJECTIONS = (
         "watchdog",
         "+inject_watchdog",
         ("reason=watchdog_timeout",),
+    ),
+    (
+        "pe_timing",
+        "+inject_pe_timing",
+        ("reason=pe_valid_timing",),
+    ),
+    (
+        "pe_weight",
+        "+inject_pe_weight",
+        ("reason=pe_weight_mismatch",),
     ),
 )
 
@@ -382,6 +392,7 @@ def _validate_summary(text: str, pass_match: re.Match[str]) -> str:
         checks,
         protocol_checks,
         alignment_checks,
+        pe_checks,
         capture_checks,
         reset_cases,
         stale_cases,
@@ -410,6 +421,11 @@ def _validate_summary(text: str, pass_match: re.Match[str]) -> str:
         raise ArrayFailure("summary reports insufficient checks")
     if alignment_checks <= 0 or capture_checks <= 0:
         raise ArrayFailure("summary reports no alignment or capture checks")
+    if pe_checks < 1_000_000:
+        raise ArrayFailure(
+            "summary reports insufficient independent per-PE checks "
+            f"({pe_checks})"
+        )
 
     pass_checks, pass_formal, pass_elements, pass_mapping = (
         int(value) for value in pass_match.groups()
@@ -426,7 +442,7 @@ def _validate_summary(text: str, pass_match: re.Match[str]) -> str:
         f"formal_cases={formal_cases} formal_elements={formal_elements} "
         f"mapping_cases={mapping_cases} transactions={transactions} "
         f"checks={checks} protocol_checks={protocol_checks} "
-        f"alignment_checks={alignment_checks} "
+        f"alignment_checks={alignment_checks} pe_checks={pe_checks} "
         f"capture_checks={capture_checks}"
     )
 

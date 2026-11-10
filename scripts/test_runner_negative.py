@@ -22,8 +22,8 @@ ARRAY_PASS_LINE = (
 ARRAY_SUMMARY_LINE = (
     "ARRAY_SUMMARY formal_cases=1009 formal_elements=16144 "
     "mapping_cases=64 transactions=1700 checks=20000 "
-    "protocol_checks=500 alignment_checks=500 capture_checks=100 "
-    "reset_cases=6 stale_cases=3"
+    "protocol_checks=500 alignment_checks=500 pe_checks=1400000 "
+    "capture_checks=100 reset_cases=6 stale_cases=3"
 )
 
 FAKE_VERILATOR = r"""#!/bin/sh

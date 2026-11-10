@@ -41,7 +41,7 @@ module systolic_array_4x4 (
     logic capture_last;
 
     assign req_ready = (state == IDLE) && !rst;
-    assign rsp_valid = rsp_valid_q;
+    assign rsp_valid = rsp_valid_q && !rst;
     assign pipe_en = (state == COMPUTE) || (state == DRAIN);
     assign issue_i = issue_idx[3:2];
     assign issue_k = issue_idx[1:0];

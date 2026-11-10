@@ -39,6 +39,7 @@ module tb_systolic_array_4x4;
     int checks;
     int protocol_checks;
     int alignment_checks;
+    int pe_checks;
     int capture_checks;
     int formal_cases;
     int formal_elements;
@@ -54,6 +55,8 @@ module tb_systolic_array_4x4;
     int tx_captures;
     int tx_injections;
     int tx_weight_rows;
+    logic pe_check_active;
+    logic pe_weight_bad [0:3][0:3];
     logic resp_prev_valid;
     logic resp_prev_ready;
     logic req_prev_valid;
@@ -70,6 +73,20 @@ module tb_systolic_array_4x4;
         .rsp_ready (rsp_ready),
         .rsp_c     (rsp_c)
     );
+
+    // Direct residency monitor: PE(r,c) must hold B[r][c] once LOAD completes.
+    // Constant generate indices are required for Verilator hierarchical reads.
+    generate
+        for (genvar wr = 0; wr < 4; wr++) begin : g_wrow
+            for (genvar wc = 0; wc < 4; wc++) begin : g_wcol
+                always_comb begin
+                    pe_weight_bad[wr][wc] =
+                        pe_check_active && mon_s >= 4 &&
+                        (dut.g_row[wr].g_col[wc].u_pe.weight_q !== tx_b[wr][wc]);
+                end
+            end
+        end
+    endgenerate
 
     initial clk = 1'b0;
     always #(CLK_HALF_NS) clk <= ~clk;
@@ -92,6 +109,72 @@ module tb_systolic_array_4x4;
     endtask
 
     task automatic check_pe_alignment;
+        logic       exp_valid;
+        logic signed [31:0] exp_psum;
+        int exp_act_i;
+        // Independent per-PE expectations: each PE(r,c) captures the wavefront
+        // carrying A[i][r] at edge t0+5+4*i+r+c and, after that edge, must hold
+        // output valid=1, activation=A[i][r], resident weight=B[r][c] and
+        // partial sum=sum_{k=0..r} A[i][k]*B[k][c]. Expectations are derived
+        // only from tx_a/tx_b and the schedule, never from DUT state.
+        if (pe_check_active && mon_s >= 4) begin
+            for (int r = 0; r < 4; r++) begin
+                for (int c = 0; c < 4; c++) begin
+                    if (pe_weight_bad[r][c]) begin
+                        $display("ARRAY_FAIL reason=pe_weight_mismatch cycle=%0d t_rel=%0d pe_r=%0d pe_c=%0d expected=%0d",
+                                 cycles, mon_s, r, c, tx_b[r][c]);
+                        $fatal(1, "PE weight residency violation");
+                    end
+                    pe_checks++;
+                end
+            end
+        end
+        if (pe_check_active) begin
+            for (int r = 0; r < 4; r++) begin
+                for (int c = 0; c < 4; c++) begin
+                    exp_valid = 1'b0;
+                    exp_psum = 32'sd0;
+                    exp_act_i = 0;
+                    for (int i = 0; i < 4; i++) begin
+                        if (mon_s == 5 + 4*i + r + c) begin
+                            exp_valid = 1'b1;
+                            exp_act_i = i;
+                            for (int k = 0; k <= r; k++) begin
+                                exp_psum = exp_psum +
+                                    $signed(tx_a[i][k]) * $signed(tx_b[k][c]);
+                            end
+                        end
+                    end
+                    if (dut.act_valid[r][c+1] !== exp_valid ||
+                        dut.psum_valid[r+1][c] !== exp_valid) begin
+                        $display("ARRAY_FAIL reason=pe_valid_timing cycle=%0d t_rel=%0d pe_r=%0d pe_c=%0d act_valid_out=%b psum_valid_out=%b expected=%b",
+                                 cycles, mon_s, r, c,
+                                 dut.act_valid[r][c+1],
+                                 dut.psum_valid[r+1][c],
+                                 exp_valid);
+                        $fatal(1, "PE output valid timing violation");
+                    end
+                    pe_checks += 2;
+                    if (exp_valid) begin
+                        if (dut.act_data[r][c+1] !== tx_a[exp_act_i][r]) begin
+                            $display("ARRAY_FAIL reason=pe_activation_mismatch cycle=%0d t_rel=%0d pe_r=%0d pe_c=%0d i=%0d got=%0d expected=%0d",
+                                     cycles, mon_s, r, c, exp_act_i,
+                                     dut.act_data[r][c+1],
+                                     tx_a[exp_act_i][r]);
+                            $fatal(1, "PE activation data violation");
+                        end
+                        if (dut.psum_data[r+1][c] !== exp_psum) begin
+                            $display("ARRAY_FAIL reason=pe_psum_mismatch cycle=%0d t_rel=%0d pe_r=%0d pe_c=%0d i=%0d got=%0d expected=%0d",
+                                     cycles, mon_s, r, c, exp_act_i,
+                                     dut.psum_data[r+1][c],
+                                     exp_psum);
+                            $fatal(1, "PE partial sum violation");
+                        end
+                        pe_checks += 2;
+                    end
+                end
+            end
+        end
         for (int r = 0; r < 4; r++) begin
             for (int c = 0; c < 4; c++) begin
                 if (dut.act_valid[r][c] !== dut.psum_valid[r][c]) begin
@@ -109,6 +192,7 @@ module tb_systolic_array_4x4;
         int active;
         if (rst) begin
             if (req_ready !== 1'b0) fail("req_ready_during_reset");
+            if (rsp_valid !== 1'b0) fail("rsp_valid_during_reset");
             if (dut.state !== IDLE) fail("state_not_idle_during_reset");
         end else begin
             if (dut.state == IDLE) begin
@@ -349,7 +433,9 @@ module tb_systolic_array_4x4;
         end
     endtask
 
-    task automatic run_normal(input int stall, input int kind, input logic change_inputs);
+    task automatic run_normal(input int stall, input int kind, input logic change_inputs,
+                              input logic inject_pe_timing = 1'b0,
+                              input logic inject_pe_weight = 1'b0);
         int s;
         cfg_stall = stall;
         cfg_kind = kind;
@@ -374,6 +460,7 @@ module tb_systolic_array_4x4;
         tx_injections = 0;
         tx_weight_rows = 0;
         mon_s = 0;
+        pe_check_active = 1'b1;
         check_transaction();
         check_capture();
         for (s = 1; s <= 25 + stall; s++) begin
@@ -389,6 +476,15 @@ module tb_systolic_array_4x4;
                     end
                 end
             end
+`ifndef VERILATOR
+            if (inject_pe_timing && s == 1) begin
+                force dut.g_row[0].g_col[0].u_pe.act_valid_out = 1'b1;
+                force dut.g_row[0].g_col[0].u_pe.psum_valid_out = 1'b1;
+            end
+            if (inject_pe_weight && s == 4) begin
+                force dut.g_row[0].g_col[0].u_pe.weight_q = 8'sd2;
+            end
+`endif
             mon_s = s;
             resp_prev_valid = rsp_valid;
             resp_prev_ready = rsp_ready;
@@ -407,6 +503,7 @@ module tb_systolic_array_4x4;
         if (tx_weight_rows != 4) fail("weight_row_count");
         req_valid = 1'b0;
         rsp_ready = 1'b1;
+        pe_check_active = 1'b0;
     endtask
 
     task automatic run_reset_stage(input int stage);
@@ -451,6 +548,9 @@ module tb_systolic_array_4x4;
         rst = 1'b1;
         req_valid = 1'b0;
         rsp_ready = (stage == 5) ? 1'b1 : 1'b0;
+        #1;
+        if (req_ready !== 1'b0) fail("req_ready_pre_posedge_reset");
+        if (rsp_valid !== 1'b0) fail("rsp_valid_pre_posedge_reset");
         tick();
         if (rsp_valid !== 1'b0) fail("residual_rsp_after_reset");
         if (req_ready !== 1'b0) fail("req_ready_after_reset_assert");
@@ -464,6 +564,11 @@ module tb_systolic_array_4x4;
         if (req_ready !== 1'b1) fail("req_ready_after_reset_release");
         if (dut.state !== IDLE) fail("state_after_reset_release");
         reset_cases++;
+        if (stage == 4) begin
+            // Response was canceled by reset while in HOLD; a fresh task must
+            // still be accepted and complete normally.
+            run_normal(0, 2, 1'b0);
+        end
     endtask
 
     task automatic run_reset_request_edge;
@@ -508,6 +613,7 @@ module tb_systolic_array_4x4;
             end
         end
         rsp_ready = 1'b1;
+        pe_check_active = 1'b1;
         for (k = 0; k < 4; k++) begin
             req_prev_valid = req_valid;
             req_prev_ready = req_ready;
@@ -567,6 +673,7 @@ module tb_systolic_array_4x4;
         end
         req_valid = 1'b0;
         rsp_ready = 1'b1;
+        pe_check_active = 1'b0;
     endtask
 
     initial begin : main
@@ -609,6 +716,7 @@ module tb_systolic_array_4x4;
         checks = 0;
         protocol_checks = 0;
         alignment_checks = 0;
+        pe_checks = 0;
         capture_checks = 0;
         formal_cases = 0;
         formal_elements = 0;
@@ -624,6 +732,7 @@ module tb_systolic_array_4x4;
         tx_captures = 0;
         tx_injections = 0;
         tx_weight_rows = 0;
+        pe_check_active = 1'b0;
 
         tick();
         tick();
@@ -636,6 +745,20 @@ module tb_systolic_array_4x4;
         if ($test$plusargs("inject_watchdog")) begin
             $display("ARRAY_INFO reason=watchdog_test_started");
             forever @(posedge clk);
+        end
+
+        if ($test$plusargs("inject_pe_timing")) begin
+            build_special_case(0);
+            run_normal(0, 2, 1'b0, 1'b1, 1'b0);
+            $display("ARRAY_FAIL reason=inject_pe_timing_not_detected cycle=%0d", cycles);
+            $fatal(1, "PE timing fault not detected");
+        end
+
+        if ($test$plusargs("inject_pe_weight")) begin
+            build_special_case(0);
+            run_normal(0, 2, 1'b0, 1'b0, 1'b1);
+            $display("ARRAY_FAIL reason=inject_pe_weight_not_detected cycle=%0d", cycles);
+            $fatal(1, "PE weight fault not detected");
         end
 
         if ($test$plusargs("inject_x") ||
@@ -715,10 +838,10 @@ module tb_systolic_array_4x4;
         if (reset_cases != 6) fail("reset_case_count");
         if (stale_cases != 3) fail("stale_case_count");
 
-        $display("ARRAY_SUMMARY formal_cases=%0d formal_elements=%0d mapping_cases=%0d transactions=%0d checks=%0d protocol_checks=%0d alignment_checks=%0d capture_checks=%0d reset_cases=%0d stale_cases=%0d",
+        $display("ARRAY_SUMMARY formal_cases=%0d formal_elements=%0d mapping_cases=%0d transactions=%0d checks=%0d protocol_checks=%0d alignment_checks=%0d pe_checks=%0d capture_checks=%0d reset_cases=%0d stale_cases=%0d",
                  formal_cases, formal_elements, mapping_cases, transactions, checks,
-                 protocol_checks, alignment_checks, capture_checks, reset_cases,
-                 stale_cases);
+                 protocol_checks, alignment_checks, pe_checks, capture_checks,
+                 reset_cases, stale_cases);
         $display("ARRAY_PASS checks=%0d formal_cases=%0d formal_elements=%0d mapping_cases=%0d",
                  checks, formal_cases, formal_elements, mapping_cases);
         $finish;
