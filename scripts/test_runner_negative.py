@@ -14,6 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 RUNNER = ROOT / "scripts" / "check_smoke.py"
 PE_RUNNER = ROOT / "scripts" / "check_pe.py"
 ARRAY_RUNNER = ROOT / "scripts" / "check_array.py"
+V1_RUNNER = ROOT / "scripts" / "check_v1.py"
 
 ARRAY_PASS_LINE = (
     "ARRAY_PASS checks=16144 formal_cases=1009 "
@@ -47,6 +48,71 @@ mkdir -p "$mdir"
     printf '%s\n' 'exit 0'
 } > "$mdir/$out"
 chmod +x "$mdir/$out"
+exit 0
+"""
+
+
+FAKE_YOSYS = r"""#!/bin/sh
+set -eu
+if [ "${1:-}" = "-V" ]; then
+    echo "Yosys 0.52 (fake)"
+    exit 0
+fi
+script=""
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        -s) script="$2"; shift 2 ;;
+        *) shift ;;
+    esac
+done
+if [ -n "${FAKE_YOSYS_SLEEP:-}" ]; then
+    sleep "$FAKE_YOSYS_SLEEP"
+fi
+target=pe
+module=pe_ws
+case "$script" in
+    *array*) target=array; module=systolic_array_4x4 ;;
+esac
+echo "Yosys 0.52 (fake)"
+echo "Top module:  \\$module"
+echo "PREMAP_BEGIN"
+if [ "$target" = "array" ]; then
+    echo "=== systolic_array_4x4 ==="
+    echo "   Number of cells: 133"
+    echo "=== design hierarchy ==="
+    echo "   systolic_array_4x4 1"
+    echo "     pe_ws 16"
+    echo "   Number of cells: 117"
+    echo "     \$mul 16"
+    echo "     \$sdffe 117"
+else
+    echo "=== pe_ws ==="
+    echo "   Number of cells: 6"
+    echo "     \$mul 1"
+    echo "     \$sdffe 5"
+fi
+echo "PREMAP_END"
+echo "FINAL_BEGIN"
+if [ "${FAKE_YOSYS_MODE:-valid}" = "zero_cells" ] && [ "$target" = "array" ]; then
+    echo "   Number of wire bits: 0"
+    echo "   Number of cells: 0"
+else
+    echo "   Number of wire bits: 10"
+    echo "   Number of cells: 10"
+    echo "     \$_AND_ 10"
+fi
+echo "FINAL_END"
+case "${FAKE_YOSYS_MODE:-valid}" in
+    no_marker)
+        ;;
+    dup_marker)
+        echo "SYNTH_DONE top=$module"
+        echo "SYNTH_DONE top=$module"
+        ;;
+    *)
+        echo "SYNTH_DONE top=$module"
+        ;;
+esac
 exit 0
 """
 
@@ -342,6 +408,80 @@ def _run_array_case(
         shutil.rmtree(root, ignore_errors=True)
 
 
+def _make_v1_root(*, patch_timeout: bool = False) -> Path:
+    root = Path(tempfile.mkdtemp(prefix="v1-runner-negative-"))
+    (root / "scripts").mkdir()
+    runner_copy = root / "scripts" / "check_v1.py"
+    shutil.copy2(V1_RUNNER, runner_copy)
+    if patch_timeout:
+        text = runner_copy.read_text(encoding="utf-8")
+        text = text.replace(
+            "SYNTH_TIMEOUT_S = 180.0",
+            "SYNTH_TIMEOUT_S = 1.0",
+        )
+        runner_copy.write_text(text, encoding="utf-8")
+    for relative in (
+        "rtl/core/npu_types.sv",
+        "rtl/core/pe_ws.sv",
+        "rtl/core/systolic_array_4x4.sv",
+    ):
+        path = root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("", encoding="utf-8")
+    return root
+
+
+def _run_v1_case(
+    name: str,
+    fake_mode: str | None,
+    expected_code: int,
+    expected_text: str,
+    *,
+    patch_timeout: bool = False,
+    fake_sleep: str | None = None,
+) -> None:
+    root = _make_v1_root(patch_timeout=patch_timeout)
+    try:
+        bin_dir = root / "bin"
+        bin_dir.mkdir()
+        env = os.environ.copy()
+        env["PATH"] = str(bin_dir)
+
+        if fake_mode is not None:
+            fake = bin_dir / "yosys"
+            fake.write_text(FAKE_YOSYS, encoding="utf-8")
+            fake.chmod(0o755)
+            sleep_tool = shutil.which("sleep")
+            if sleep_tool is None:
+                raise RuntimeError("required host tool not found: sleep")
+            os.symlink(sleep_tool, bin_dir / "sleep")
+            env["FAKE_YOSYS_MODE"] = fake_mode
+            if fake_sleep is not None:
+                env["FAKE_YOSYS_SLEEP"] = fake_sleep
+
+        result = subprocess.run(
+            [sys.executable, str(root / "scripts" / "check_v1.py"), "synth"],
+            cwd=root,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        output = (result.stdout or "") + (result.stderr or "")
+        if result.returncode != expected_code:
+            raise AssertionError(
+                f"{name}: expected exit {expected_code}, "
+                f"got {result.returncode}\n{output}"
+            )
+        if expected_text not in output:
+            raise AssertionError(
+                f"{name}: expected text {expected_text!r} not found\n{output}"
+            )
+        print(f"PASS {name}: exit={result.returncode}, message matched")
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def main() -> int:
     try:
         _run_case(
@@ -473,6 +613,38 @@ def main() -> int:
             ),
             1,
             "formal case count 1008 != 1009",
+        )
+        _run_v1_case(
+            "v1-synth-tool-missing",
+            None,
+            3,
+            "required tool not found",
+        )
+        _run_v1_case(
+            "v1-synth-timeout",
+            "valid",
+            2,
+            "timed out after",
+            patch_timeout=True,
+            fake_sleep="5",
+        )
+        _run_v1_case(
+            "v1-synth-missing-marker",
+            "no_marker",
+            1,
+            "expected exactly one 'SYNTH_DONE top=pe_ws' completion marker",
+        )
+        _run_v1_case(
+            "v1-synth-duplicate-marker",
+            "dup_marker",
+            1,
+            "expected exactly one 'SYNTH_DONE top=pe_ws' completion marker",
+        )
+        _run_v1_case(
+            "v1-synth-zero-cell-report",
+            "zero_cells",
+            1,
+            "zero cell or wire statistics",
         )
     except Exception as exc:
         print(f"FAIL: {exc}", file=sys.stderr)
