@@ -93,21 +93,43 @@ else
 fi
 echo "PREMAP_END"
 echo "FINAL_BEGIN"
-if [ "${FAKE_YOSYS_MODE:-valid}" = "zero_cells" ] && [ "$target" = "array" ]; then
+mode="${FAKE_YOSYS_MODE:-valid}"
+if [ "$mode" = "zero_cells" ] && [ "$target" = "array" ]; then
     echo "   Number of wire bits: 0"
     echo "   Number of cells: 0"
-else
-    echo "   Number of wire bits: 10"
+elif [ "$mode" = "pe_bad_cells" ] && [ "$target" = "pe" ]; then
+    echo "   Number of wire bits: 1198"
     echo "   Number of cells: 10"
     echo "     \$_AND_ 10"
+elif [ "$mode" = "array_bad_wire" ] && [ "$target" = "array" ]; then
+    echo "   Number of wire bits: 10"
+    echo "   Number of cells: 18246"
+    echo "     pe_ws 16"
+    echo "     \$_AND_ 18230"
+elif [ "$target" = "array" ]; then
+    echo "   Number of wire bits: 20378"
+    echo "   Number of cells: 18246"
+    echo "     pe_ws 16"
+    echo "     \$_AND_ 18230"
+else
+    echo "   Number of wire bits: 1198"
+    echo "   Number of cells: 1144"
+    echo "     \$_AND_ 1143"
 fi
 echo "FINAL_END"
-case "${FAKE_YOSYS_MODE:-valid}" in
+case "$mode" in
     no_marker)
         ;;
     dup_marker)
         echo "SYNTH_DONE top=$module"
         echo "SYNTH_DONE top=$module"
+        ;;
+    array_no_marker)
+        if [ "$target" = "array" ]; then
+            :
+        else
+            echo "SYNTH_DONE top=$module"
+        fi
         ;;
     *)
         echo "SYNTH_DONE top=$module"
@@ -645,6 +667,24 @@ def main() -> int:
             "zero_cells",
             1,
             "zero cell or wire statistics",
+        )
+        _run_v1_case(
+            "v1-synth-array-missing-marker",
+            "array_no_marker",
+            1,
+            "expected exactly one 'SYNTH_DONE top=systolic_array_4x4'",
+        )
+        _run_v1_case(
+            "v1-synth-pe-cell-mismatch",
+            "pe_bad_cells",
+            1,
+            "pe_ws final cell count 10 != 1144",
+        )
+        _run_v1_case(
+            "v1-synth-array-wire-mismatch",
+            "array_bad_wire",
+            1,
+            "systolic_array_4x4 final wire-bit count 10 != 20378",
         )
     except Exception as exc:
         print(f"FAIL: {exc}", file=sys.stderr)

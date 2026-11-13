@@ -38,6 +38,11 @@ EXPECTED_PE_PREMARK_MUL = 1
 EXPECTED_PE_PREMARK_SDFFE = 5
 EXPECTED_ARRAY_PREMARK_MUL = 16
 EXPECTED_ARRAY_PREMARK_SDFFE = 117
+EXPECTED_PE_CELLS = 1_144
+EXPECTED_PE_WIRE_BITS = 1_198
+EXPECTED_ARRAY_CELLS = 18_246
+EXPECTED_ARRAY_WIRE_BITS = 20_378
+EXPECTED_ARRAY_ALLOWED_WARNINGS = 11
 
 EXPECTED_ARRAY_PASS = (
     "ARRAY_PASS checks=188131 formal_cases=1009 "
@@ -58,7 +63,7 @@ EXPECTED_ARRAY_SUMMARY = {
 }
 EXPECTED_SMOKE_CHECKS = 274
 EXPECTED_UNITTEST_TESTS = 18
-EXPECTED_NEGATIVE_CASES = 22
+EXPECTED_NEGATIVE_CASES = 25
 
 ARRAY_SUMMARY_STDOUT_RE = re.compile(
     r"^summary: formal_cases=(\d+) formal_elements=(\d+) "
@@ -87,6 +92,12 @@ ALLOWED_MEMORY_WARNING_RE = re.compile(
 )
 LATCH_CELL_RE = re.compile(
     r"^\s+(\$[^\s]*[Ll][Aa][Tt][Cc][Hh][^\s]*)\s+(\d+)\s*$", re.MULTILINE
+)
+UNDRIVEN_WARNING_RE = re.compile(
+    r"^Warning: .*is used but has no driver", re.IGNORECASE
+)
+MULTI_DRIVEN_WARNING_RE = re.compile(
+    r"^Warning: .*multiple (?:conflicting )?drivers", re.IGNORECASE
 )
 
 REQUIRED_DOCS = (
@@ -127,6 +138,8 @@ class _SynthStats(NamedTuple):
     wire_bits: int
     cell_count: int
     latch_count: int
+    undriven_count: int
+    multi_driven_count: int
     total_warnings: int
     allowed_warnings: int
     unexpected_warnings: int
@@ -352,6 +365,12 @@ def _parse_synth_stats(
             "Yosys warning summary disagrees with warning lines "
             f"({total_warnings} vs {len(warnings)})"
         )
+    undriven_count = sum(
+        1 for line in lines if UNDRIVEN_WARNING_RE.match(line.strip())
+    )
+    multi_driven_count = sum(
+        1 for line in lines if MULTI_DRIVEN_WARNING_RE.match(line.strip())
+    )
 
     marker = f"SYNTH_DONE top={top}"
     marker_count = sum(1 for line in lines if marker in line)
@@ -402,10 +421,35 @@ def _parse_synth_stats(
         raise V1GateFailure(
             "Yosys final report contains zero cell or wire statistics"
         )
+    expected_wire_bits = (
+        EXPECTED_ARRAY_WIRE_BITS
+        if top == ARRAY_TOP
+        else EXPECTED_PE_WIRE_BITS
+    )
+    expected_cells = (
+        EXPECTED_ARRAY_CELLS if top == ARRAY_TOP else EXPECTED_PE_CELLS
+    )
+    if wire_bits != expected_wire_bits:
+        raise V1GateFailure(
+            f"{top} final wire-bit count {wire_bits} != {expected_wire_bits}"
+        )
+    if cell_count != expected_cells:
+        raise V1GateFailure(
+            f"{top} final cell count {cell_count} != {expected_cells}"
+        )
 
     latch_count = sum(int(count) for _, count in LATCH_CELL_RE.findall(final))
     if latch_count != 0:
         raise V1GateFailure(f"Yosys report contains {latch_count} latch cells")
+    if undriven_count != 0:
+        raise V1GateFailure(
+            f"Yosys report contains {undriven_count} undriven-net warnings"
+        )
+    if multi_driven_count != 0:
+        raise V1GateFailure(
+            "Yosys report contains "
+            f"{multi_driven_count} multi-driven-net warnings"
+        )
 
     pe_instances = 0
     if top == ARRAY_TOP:
@@ -445,6 +489,8 @@ def _parse_synth_stats(
         wire_bits=wire_bits,
         cell_count=cell_count,
         latch_count=latch_count,
+        undriven_count=undriven_count,
+        multi_driven_count=multi_driven_count,
         total_warnings=total_warnings,
         allowed_warnings=len(allowed),
         unexpected_warnings=len(unexpected),
@@ -548,6 +594,7 @@ def run_v1_synthesis(build_dir: Path) -> SynthesisReport:
         array_text, ARRAY_TOP, allow_memory_warnings=True
     )
 
+    yosys_version = version_text.splitlines()[0]
     report = SynthesisReport(
         top=ARRAY_TOP,
         wire_bits=array_stats.wire_bits,
@@ -556,27 +603,44 @@ def run_v1_synthesis(build_dir: Path) -> SynthesisReport:
         warning_count=array_stats.unexpected_warnings,
         error_count=array_stats.error_count,
     )
+
+    def _meta_entry(top: str, stats: _SynthStats) -> dict[str, int | str]:
+        return {
+            "top": top,
+            "wire_bits": stats.wire_bits,
+            "cell_count": stats.cell_count,
+            "latch_count": stats.latch_count,
+            "undriven": stats.undriven_count,
+            "multi_driven": stats.multi_driven_count,
+            "error_count": stats.error_count,
+            "total_warnings": stats.total_warnings,
+            "allowed_warnings": stats.allowed_warnings,
+            "unexpected_warnings": stats.unexpected_warnings,
+            "premap_mul": stats.premap_mul,
+            "premap_sdffe": stats.premap_sdffe,
+            "pe_instances": stats.pe_instances,
+            "marker_count": stats.marker_count,
+        }
+
+    def _pass_line(top: str, stats: _SynthStats) -> str:
+        return (
+            f"SYNTH_PASS top={top} wire_bits={stats.wire_bits} "
+            f"cells={stats.cell_count} latch={stats.latch_count} "
+            f"undriven={stats.undriven_count} "
+            f"multi_driven={stats.multi_driven_count} "
+            f"errors={stats.error_count} "
+            f"unexpected_warnings={stats.unexpected_warnings} "
+            f"total_warnings={stats.total_warnings} "
+            f"allowed_warnings={stats.allowed_warnings} "
+            f"premap_mul={stats.premap_mul} "
+            f"premap_sdffe={stats.premap_sdffe} "
+            f"pe_instances={stats.pe_instances} yosys={yosys_version}"
+        )
+
     meta = {
-        "yosys_version": version_text.splitlines()[0],
-        "pe": {
-            "wire_bits": pe_stats.wire_bits,
-            "cell_count": pe_stats.cell_count,
-            "premap_mul": pe_stats.premap_mul,
-            "premap_sdffe": pe_stats.premap_sdffe,
-            "total_warnings": pe_stats.total_warnings,
-            "allowed_warnings": pe_stats.allowed_warnings,
-            "unexpected_warnings": pe_stats.unexpected_warnings,
-        },
-        "array": {
-            "wire_bits": array_stats.wire_bits,
-            "cell_count": array_stats.cell_count,
-            "premap_mul": array_stats.premap_mul,
-            "premap_sdffe": array_stats.premap_sdffe,
-            "pe_instances": array_stats.pe_instances,
-            "total_warnings": array_stats.total_warnings,
-            "allowed_warnings": array_stats.allowed_warnings,
-            "unexpected_warnings": array_stats.unexpected_warnings,
-        },
+        "yosys_version": yosys_version,
+        "pe": _meta_entry(PE_TOP, pe_stats),
+        "array": _meta_entry(ARRAY_TOP, array_stats),
         "source_sha256": {
             str(path.relative_to(ROOT)): _sha256(path)
             for path in (
@@ -597,19 +661,16 @@ def run_v1_synthesis(build_dir: Path) -> SynthesisReport:
     (build_dir / "synthesis_meta.json").write_text(
         json.dumps(meta, indent=2) + "\n", encoding="utf-8"
     )
-
-    print(
-        f"SYNTH_PASS top={report.top} wire_bits={report.wire_bits} "
-        f"cells={report.cell_count} latch={report.latch_count} "
-        f"unexpected_warnings={report.warning_count} errors={report.error_count} "
-        f"pe_instances={array_stats.pe_instances} "
-        f"premap_mul={array_stats.premap_mul} "
-        f"premap_sdffe={array_stats.premap_sdffe} "
-        f"total_warnings={array_stats.total_warnings} "
-        f"allowed_warnings={array_stats.allowed_warnings} "
-        f"pe_cells={pe_stats.cell_count} pe_wire_bits={pe_stats.wire_bits} "
-        f"yosys={meta['yosys_version']}"
+    pass_lines = (
+        _pass_line(PE_TOP, pe_stats),
+        _pass_line(ARRAY_TOP, array_stats),
     )
+    (build_dir / "synthesis_pass.log").write_text(
+        "\n".join(pass_lines) + "\n", encoding="utf-8"
+    )
+
+    for line in pass_lines:
+        print(line)
     return report
 
 
@@ -884,10 +945,15 @@ def validate_v1_gate(
 
     if report.top != ARRAY_TOP:
         failures.append(f"report top {report.top!r} != {ARRAY_TOP!r}")
-    if report.cell_count <= 0:
-        failures.append("report cell count is not positive")
-    if report.wire_bits <= 0:
-        failures.append("report wire-bit count is not positive")
+    if report.cell_count != EXPECTED_ARRAY_CELLS:
+        failures.append(
+            f"report cell count {report.cell_count} != {EXPECTED_ARRAY_CELLS}"
+        )
+    if report.wire_bits != EXPECTED_ARRAY_WIRE_BITS:
+        failures.append(
+            f"report wire-bit count {report.wire_bits} "
+            f"!= {EXPECTED_ARRAY_WIRE_BITS}"
+        )
     if report.latch_count != 0:
         failures.append(f"report latch count is {report.latch_count}, not 0")
     if report.warning_count != 0:
@@ -970,6 +1036,153 @@ def validate_v1_gate(
             _require_nonempty_file(
                 SYNTH_BUILD / "synthesis_meta.json", "synthesis metadata"
             )
+            _require_nonempty_file(
+                SYNTH_BUILD / "synthesis_pass.log", "synthesis PASS log"
+            )
+
+            pe_stats = _parse_synth_stats(
+                (SYNTH_BUILD / "yosys_pe.log").read_text(
+                    encoding="utf-8", errors="replace"
+                ),
+                PE_TOP,
+                allow_memory_warnings=False,
+            )
+            array_stats = _parse_synth_stats(
+                (SYNTH_BUILD / "yosys_array.log").read_text(
+                    encoding="utf-8", errors="replace"
+                ),
+                ARRAY_TOP,
+                allow_memory_warnings=True,
+            )
+            expected_meta = {
+                "pe": (
+                    PE_TOP,
+                    0,
+                    0,
+                    EXPECTED_PE_PREMARK_MUL,
+                    EXPECTED_PE_PREMARK_SDFFE,
+                ),
+                "array": (
+                    ARRAY_TOP,
+                    EXPECTED_ARRAY_ALLOWED_WARNINGS,
+                    EXPECTED_ARRAY_ALLOWED_WARNINGS,
+                    EXPECTED_ARRAY_PREMARK_MUL,
+                    EXPECTED_ARRAY_PREMARK_SDFFE,
+                ),
+            }
+            try:
+                meta = json.loads(
+                    (SYNTH_BUILD / "synthesis_meta.json").read_text(
+                        encoding="utf-8"
+                    )
+                )
+            except json.JSONDecodeError as exc:
+                failures.append(f"synthesis metadata is invalid JSON: {exc}")
+                meta = {}
+            if not isinstance(meta, dict):
+                failures.append("synthesis metadata is not a JSON object")
+                meta = {}
+            if not str(meta.get("yosys_version", "")).startswith(
+                EXPECTED_YOSYS_PREFIX
+            ):
+                failures.append(
+                    "synthesis metadata Yosys version "
+                    f"{meta.get('yosys_version')!r} does not match "
+                    f"{EXPECTED_YOSYS_PREFIX!r}"
+                )
+            for key, (
+                top,
+                total_warnings,
+                allowed_warnings,
+                premap_mul,
+                premap_sdffe,
+            ) in expected_meta.items():
+                entry = meta.get(key)
+                if not isinstance(entry, dict):
+                    failures.append(
+                        f"synthesis metadata is missing {key!r} entry"
+                    )
+                    continue
+                expected_fields = {
+                    "top": top,
+                    "wire_bits": (
+                        EXPECTED_ARRAY_WIRE_BITS
+                        if top == ARRAY_TOP
+                        else EXPECTED_PE_WIRE_BITS
+                    ),
+                    "cell_count": (
+                        EXPECTED_ARRAY_CELLS
+                        if top == ARRAY_TOP
+                        else EXPECTED_PE_CELLS
+                    ),
+                    "latch_count": 0,
+                    "undriven": 0,
+                    "multi_driven": 0,
+                    "error_count": 0,
+                    "total_warnings": total_warnings,
+                    "allowed_warnings": allowed_warnings,
+                    "unexpected_warnings": 0,
+                    "premap_mul": premap_mul,
+                    "premap_sdffe": premap_sdffe,
+                    "pe_instances": PE_COUNT if top == ARRAY_TOP else 0,
+                    "marker_count": 1,
+                }
+                for field, expected in expected_fields.items():
+                    if entry.get(field) != expected:
+                        failures.append(
+                            f"synthesis metadata {top} {field} "
+                            f"{entry.get(field)!r} != {expected!r}"
+                        )
+
+            pass_lines = [
+                line
+                for line in (
+                    SYNTH_BUILD / "synthesis_pass.log"
+                ).read_text(encoding="utf-8").splitlines()
+                if line.startswith("SYNTH_PASS top=")
+            ]
+            if len(pass_lines) != 2:
+                failures.append(
+                    "synthesis PASS log has "
+                    f"{len(pass_lines)} SYNTH_PASS lines, expected 2"
+                )
+            for top, cells, wire_bits in (
+                (PE_TOP, EXPECTED_PE_CELLS, EXPECTED_PE_WIRE_BITS),
+                (ARRAY_TOP, EXPECTED_ARRAY_CELLS, EXPECTED_ARRAY_WIRE_BITS),
+            ):
+                matches = [
+                    line
+                    for line in pass_lines
+                    if f"SYNTH_PASS top={top} " in line
+                ]
+                if len(matches) != 1:
+                    failures.append(
+                        f"synthesis PASS log has {len(matches)} lines "
+                        f"for top {top}, expected 1"
+                    )
+                    continue
+                required = (
+                    f"wire_bits={wire_bits} cells={cells} latch=0 "
+                    "undriven=0 multi_driven=0 errors=0 "
+                    "unexpected_warnings=0"
+                )
+                if required not in matches[0]:
+                    failures.append(
+                        f"synthesis PASS line for {top} lacks {required!r}"
+                    )
+
+            for top, stats in ((PE_TOP, pe_stats), (ARRAY_TOP, array_stats)):
+                if stats.marker_count != 1:
+                    failures.append(
+                        f"{top} synthesis marker count "
+                        f"{stats.marker_count} != 1"
+                    )
+                if stats.undriven_count or stats.multi_driven_count:
+                    failures.append(
+                        f"{top} synthesis undriven="
+                        f"{stats.undriven_count} multi_driven="
+                        f"{stats.multi_driven_count}"
+                    )
 
             _require_vcd(
                 BUILD_ROOT / "array_sim/array.vcd",
@@ -1019,8 +1232,12 @@ def validate_v1_gate(
         )
 
     print(
-        f"V1_GATE_PASS top={report.top} cells={report.cell_count} "
-        f"wire_bits={report.wire_bits} regressions={len(results)} "
+        f"V1_GATE_PASS tops={PE_TOP},{ARRAY_TOP} "
+        f"pe_cells={EXPECTED_PE_CELLS} "
+        f"pe_wire_bits={EXPECTED_PE_WIRE_BITS} "
+        f"array_cells={report.cell_count} "
+        f"array_wire_bits={report.wire_bits} "
+        f"regressions={len(results)} "
         f"vector_sha256={EXPECTED_VECTOR_SHA256}"
     )
 
@@ -1053,8 +1270,12 @@ def main() -> int:
             assert report is not None
             validate_v1_gate(report, results)
             print(
-                f"V1_PASS top={report.top} cells={report.cell_count} "
-                f"wire_bits={report.wire_bits} commands={len(results)}"
+                f"V1_PASS tops={PE_TOP},{ARRAY_TOP} "
+                f"pe_cells={EXPECTED_PE_CELLS} "
+                f"pe_wire_bits={EXPECTED_PE_WIRE_BITS} "
+                f"array_cells={report.cell_count} "
+                f"array_wire_bits={report.wire_bits} "
+                f"commands={len(results)}"
             )
         elif args.phase == "regress":
             if any(result.exit_code != 0 for result in results):
