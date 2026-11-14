@@ -6,6 +6,7 @@ build/
 *.fst
 *.wlf
 
+# 原始运行日志仅本地保留，不入库
 artifacts/
 
 # Python 缓存

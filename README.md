@@ -18,7 +18,7 @@
 </div>
 
 > [!NOTE]
-> **当前公开内容：项目规划、工具链选型，以及 S0 的最小 RTL、自检测试和仿真/综合入口；V1 的规格、参考模型和阵列 RTL 也已提交。** 上方徽章表示计划采用的技术，不代表已通过验证。
+> **当前公开内容：项目规划、工具链选型、S0 工具链闭环，以及 V1 的阵列 RTL、Python 参考模型、1009 例逐拍对拍和双顶层综合。** 上方徽章表示计划采用的技术，不代表已通过验证。
 
 <a id="overview"></a>
 
@@ -133,8 +133,8 @@ C[i][j] = Σ(k=0..3) A[i][k] × B[k][j]
 
 | 阶段 | 目标 | 主要交付 | 状态 |
 |:---:|---|---|:---:|
-| **S0** | 工具链验证 | 最小 RTL、自检测试、仿真与综合入口 | 进行中 |
-| **V1** | 独立计算核 | PE 与阵列、参考模型、逐拍测试、综合报告 | 进行中 |
+| **S0** | 工具链验证 | 最小 RTL、自检测试、仿真与综合入口 | 已完成 |
+| **V1** | 独立计算核 | PE 与阵列、参考模型、逐拍测试、综合报告 | 已完成 |
 | **V2** | 单时钟 SoC | Ibex 裸机基线、MMIO、真实网络层比对 | 未完成 |
 | **V3** | 双时钟 SoC | 异步 FIFO、复位与背压测试、形式验证 | 未完成 |
 | **V4** | FPGA 验证 | 板卡配置、时序约束、资源与性能记录 | 未完成 |
@@ -165,7 +165,19 @@ C[i][j] = Σ(k=0..3) A[i][k] × B[k][j]
 | Python | 3.14.4（WSL） | 整数参考模型、向量生成与结果检查 |
 | Icarus Verilog | 14.0（Windows，仅探测） | 四态仿真与 X/Z 注入测试 |
 
-这些版本来自 [环境记录](env/tool_versions.txt)，兼容范围和统一回归入口尚未验证。Ibex 版本与裸机交叉编译工具链将在 V2 阶段固定。工具链的备选方案及选型理由见 [ADR-0001](docs/decisions/ADR-0001-s0-toolchain.md)。
+这些版本来自 [环境记录](env/tool_versions.txt)。四态工具通过 `FOUR_STATE_IVERILOG` 指定，脚本先查这个变量，再查 PATH。Ibex 版本与裸机交叉编译工具链将在 V2 阶段固定，选型理由见 [ADR-0001](docs/decisions/ADR-0001-s0-toolchain.md)。
+
+## 怎么跑
+
+全部从源码重建，不复用旧二进制。退出码约定：判据不符 1、超时 2、工具缺失 3。
+
+```bash
+python3 scripts/check_smoke.py sim     # S0：计数器二态仿真
+python3 scripts/check_smoke.py sim4    # S0：四态 X/Z 注入
+python3 scripts/check_pe.py sim        # 单 PE 逐拍对拍
+python3 scripts/check_array.py sim     # 4×4 阵列，1009 例对拍
+python3 scripts/check_v1.py all        # 双顶层综合 + 11 条回归
+```
 
 <a id="docs"></a>
 
