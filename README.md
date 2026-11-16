@@ -228,7 +228,9 @@ python3 scripts/check_v1.py all        # 双顶层综合 + 11 条回归
 
 ## 许可
 
-本项目尚未选定开源许可证。
+本项目采用 [MIT License](LICENSE)。
+
+引用的第三方组件遵循其原有许可。
 
 <div align="right">
 
